@@ -7,7 +7,33 @@
     <title>When the Internet Goes Dark — Network Outages Explained</title>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <section class="scroll-section" id="naive-model">
+        <div class="scroll-graphic">
+          <canvas id="station-canvas"></canvas>
+        </div>
+        <div class="scroll-steps">
+          <div class="step" data-step="0">
+            <p>You're standing on 1F of Taipei Main Station, phone in hand. Your friends just arrived but they're lost somewhere in B1.</p>
+          </div>
+          <div class="step" data-step="1">
+            <p>You open LINE and start an audio call. "Where are you?" you ask.</p>
+          </div>
+          <div class="step" data-step="2">
+            <p>Your voice becomes tiny packets of data leaving your phone...</p>
+          </div>
+          <div class="step" data-step="3">
+            <p>The packets float through the station, traveling from 1F down to B1...</p>
+          </div>
+          <div class="step" data-step="4">
+            <p>"I'm near the Breeze food court!" your friend replies. The packets made it.</p>
+          </div>
+          <div class="step" data-step="5">
+            <p>Simple, right? Your voice just floated through the air to their phone. ...except that's NOT how it works at all.</p>
+          </div>
+        </div>
+      </section>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
