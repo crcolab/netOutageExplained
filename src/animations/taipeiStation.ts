@@ -13,6 +13,10 @@ function mapRange(v: number, inMin: number, inMax: number, outMin: number, outMa
   return lerp(outMin, outMax, t);
 }
 
+function easeInOut(t: number): number {
+  return t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+}
+
 interface Point { x: number; y: number }
 
 function interpolatePath(path: Point[], t: number): Point {
@@ -28,6 +32,45 @@ function interpolatePath(path: Point[], t: number): Point {
   };
 }
 
+// ── Camera ──
+
+interface Camera { x: number; y: number; zoom: number }
+
+interface CameraKeyframe { t: number; cam: Camera }
+
+const CAMERA_KEYFRAMES: CameraKeyframe[] = [
+  { t: 0.000, cam: { x: 160, y: 200, zoom: 1.0 } },
+  { t: 0.060, cam: { x: 64, y: 95, zoom: 3.0 } },
+  { t: 0.120, cam: { x: 244, y: 225, zoom: 3.0 } },
+  { t: 0.160, cam: { x: 244, y: 225, zoom: 3.0 } },
+  { t: 0.200, cam: { x: 72, y: 90, zoom: 4.5 } },
+  { t: 0.250, cam: { x: 72, y: 90, zoom: 4.5 } },
+  { t: 0.280, cam: { x: 72, y: 90, zoom: 3.5 } },  // transition into tracking
+  { t: 0.650, cam: { x: 248, y: 218, zoom: 3.5 } }, // end of tracking
+  { t: 0.700, cam: { x: 252, y: 222, zoom: 4.0 } },
+  { t: 0.780, cam: { x: 160, y: 200, zoom: 1.0 } },
+  { t: 0.900, cam: { x: 160, y: 200, zoom: 1.0 } },
+];
+
+function getCameraFromKeyframes(progress: number): Camera {
+  const kf = CAMERA_KEYFRAMES;
+  if (progress <= kf[0].t) return { ...kf[0].cam };
+  if (progress >= kf[kf.length - 1].t) return { ...kf[kf.length - 1].cam };
+
+  for (let i = 0; i < kf.length - 1; i++) {
+    if (progress >= kf[i].t && progress <= kf[i + 1].t) {
+      const segT = (progress - kf[i].t) / (kf[i + 1].t - kf[i].t);
+      const e = easeInOut(segT);
+      return {
+        x: lerp(kf[i].cam.x, kf[i + 1].cam.x, e),
+        y: lerp(kf[i].cam.y, kf[i + 1].cam.y, e),
+        zoom: lerp(kf[i].cam.zoom, kf[i + 1].cam.zoom, e),
+      };
+    }
+  }
+  return { ...kf[kf.length - 1].cam };
+}
+
 // ── Constants ──
 
 const W = 320;
@@ -35,7 +78,7 @@ const H = 400;
 
 const PACKET_COLORS = ['#ff004d', '#29adff', '#00e436', '#ffec27', '#ff77a8'];
 const NUM_PACKETS = 5;
-const PACKET_SPREAD = 0.07;
+const PACKET_SPREAD = 0.04;
 
 const PACKET_PATH: Point[] = [
   { x: 68, y: 88 },   // Your phone
@@ -61,24 +104,85 @@ export class TaipeiStationScene {
   }
 
   resize() {
-    // Internal resolution stays fixed; CSS handles display size
     this.ctx.imageSmoothingEnabled = false;
   }
 
+  // ── Main render ──
+
   render(progress: number, timestamp?: number) {
     const ctx = this.ctx;
+    const ts = timestamp ?? Date.now();
     ctx.clearRect(0, 0, W, H);
 
+    // Compute lead packet position for camera tracking
+    const leadPos = this.getLeadPacketPos(progress);
+
+    // Compute camera
+    const cam = this.getCamera(progress, leadPos);
+
+    // Apply camera transform
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+    ctx.scale(cam.zoom, cam.zoom);
+    ctx.translate(-cam.x, -cam.y);
+
+    // Draw scene in world coordinates
     this.drawBuilding(ctx);
-    this.drawTrains(ctx, timestamp ?? Date.now());
+
+    // Ambient trains only when zoomed out
+    if (cam.zoom < 2.5) {
+      this.drawAmbientTrains(ctx, ts);
+    }
+
+    // Dramatic trains (scroll-driven)
+    this.drawDramaticTrains(ctx, progress);
+
+    // Characters
     this.drawCharacter(ctx, 60, 82, 'You', { body: '#29adff', dark: '#1d6fa5' });
     this.drawCharacter(ctx, 240, 212, 'Friend', { body: '#00e436', dark: '#00913a' });
+
+    // Speech bubble
+    this.drawSpeechBubble(ctx, progress, ts);
+
+    // Character highlights
+    this.drawHighlight(ctx, progress, ts);
+
+    // Phone glow
     this.drawPhoneGlow(ctx, progress);
+
+    // Packets (drawn last in world-space so they appear in front)
     this.drawPackets(ctx, progress);
 
+    ctx.restore();
+
+    // Dim overlay in screen-space (no camera transform)
     if (progress > 0.85) {
       this.drawDimOverlay(ctx, mapRange(progress, 0.85, 1, 0, 0.45));
     }
+  }
+
+  // ── Camera ──
+
+  private getCamera(progress: number, leadPacketPos: Point | null): Camera {
+    const cam = getCameraFromKeyframes(progress);
+
+    // During packet tracking phase, override x/y with lead packet position
+    if (progress >= 0.28 && progress <= 0.65 && leadPacketPos) {
+      // Blend factor: how much to follow the packet vs keyframe
+      const enterBlend = mapRange(progress, 0.28, 0.32, 0, 1);
+      const exitBlend = mapRange(progress, 0.60, 0.65, 1, 0);
+      const blend = Math.min(enterBlend, exitBlend);
+      cam.x = lerp(cam.x, leadPacketPos.x, blend);
+      cam.y = lerp(cam.y, leadPacketPos.y, blend);
+    }
+
+    return cam;
+  }
+
+  private getLeadPacketPos(progress: number): Point | null {
+    if (progress < 0.25) return null;
+    const packetT = clamp(mapRange(progress, 0.25, 0.75, 0, 1), 0, 1);
+    return interpolatePath(PACKET_PATH, packetT);
   }
 
   // ── Building ──
@@ -197,32 +301,41 @@ export class TaipeiStationScene {
 
   // ── Trains ──
 
-  private drawTrains(ctx: CanvasRenderingContext2D, timestamp: number) {
+  private drawAmbientTrains(ctx: CanvasRenderingContext2D, timestamp: number) {
     // MRT train: right to left, loops every 4 seconds
     const mrtCycle = (timestamp % 4000) / 4000;
     const mrtX = lerp(W + 20, -100, mrtCycle);
     this.drawMRTTrain(ctx, mrtX, 135);
 
-    // THSR train: left to right, loops every 3 seconds (faster!)
+    // THSR train: left to right, loops every 3 seconds
     const thsrCycle = (timestamp % 3000) / 3000;
     const thsrX = lerp(-120, W + 20, thsrCycle);
     this.drawTHSRTrain(ctx, thsrX, 283);
   }
 
+  private drawDramaticTrains(ctx: CanvasRenderingContext2D, progress: number) {
+    // MRT dramatic pass: progress 0.35–0.45, right to left
+    if (progress >= 0.35 && progress <= 0.45) {
+      const mrtX = mapRange(progress, 0.35, 0.45, W + 20, -100);
+      this.drawMRTTrain(ctx, mrtX, 135);
+    }
+
+    // THSR dramatic pass: progress 0.52–0.60, left to right
+    if (progress >= 0.52 && progress <= 0.60) {
+      const thsrX = mapRange(progress, 0.52, 0.60, -120, W + 20);
+      this.drawTHSRTrain(ctx, thsrX, 283);
+    }
+  }
+
   private drawMRTTrain(ctx: CanvasRenderingContext2D, x: number, y: number) {
-    // Boxy MRT train ~80px wide, 16px tall
-    // Body
     ctx.fillStyle = '#2979b9';
     ctx.fillRect(x, y, 80, 16);
-    // Stripe
     ctx.fillStyle = '#3aa5d9';
     ctx.fillRect(x, y + 3, 80, 3);
-    // Windows
     ctx.fillStyle = '#a0e0ff';
     for (let wx = x + 6; wx < x + 76; wx += 12) {
       ctx.fillRect(wx, y + 2, 8, 5);
     }
-    // Wheels
     ctx.fillStyle = '#333333';
     ctx.fillRect(x + 8, y + 16, 6, 3);
     ctx.fillRect(x + 30, y + 16, 6, 3);
@@ -231,27 +344,20 @@ export class TaipeiStationScene {
   }
 
   private drawTHSRTrain(ctx: CanvasRenderingContext2D, x: number, y: number) {
-    // Pointed-nose bullet train ~100px wide, 14px tall
-    // Body
     ctx.fillStyle = '#ff8c00';
     ctx.fillRect(x + 12, y, 88, 14);
-    // Pointed nose (left)
     ctx.fillStyle = '#ff8c00';
     ctx.fillRect(x + 6, y + 2, 6, 10);
     ctx.fillRect(x + 2, y + 4, 4, 6);
     ctx.fillRect(x, y + 5, 2, 4);
-    // Tail (right)
     ctx.fillRect(x + 100, y + 2, 4, 10);
     ctx.fillRect(x + 104, y + 4, 2, 6);
-    // Stripe
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(x + 12, y + 6, 88, 2);
-    // Windows
     ctx.fillStyle = '#ffe0a0';
     for (let wx = x + 18; wx < x + 96; wx += 10) {
       ctx.fillRect(wx, y + 2, 6, 4);
     }
-    // Wheels
     ctx.fillStyle = '#333333';
     ctx.fillRect(x + 20, y + 14, 6, 3);
     ctx.fillRect(x + 50, y + 14, 6, 3);
@@ -307,6 +413,91 @@ export class TaipeiStationScene {
     this.drawText(ctx, label, x - 2, y + 30);
   }
 
+  // ── Character highlight pulse ──
+
+  private drawHighlight(ctx: CanvasRenderingContext2D, progress: number, timestamp: number) {
+    // Highlight "You" during zoom-to-You phase
+    if (progress >= 0.03 && progress <= 0.12) {
+      const alpha = (0.4 + 0.3 * Math.sin(timestamp * 0.006)) *
+        mapRange(progress, 0.03, 0.06, 0, 1) *
+        mapRange(progress, 0.10, 0.12, 1, 0);
+      ctx.strokeStyle = `rgba(41, 173, 255, ${clamp(alpha, 0, 1)})`;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(56, 78, 20, 38);
+    }
+
+    // Highlight "Friend" during pan-to-Friend phase
+    if (progress >= 0.10 && progress <= 0.20) {
+      const alpha = (0.4 + 0.3 * Math.sin(timestamp * 0.006)) *
+        mapRange(progress, 0.10, 0.13, 0, 1) *
+        mapRange(progress, 0.18, 0.20, 1, 0);
+      ctx.strokeStyle = `rgba(0, 228, 54, ${clamp(alpha, 0, 1)})`;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(236, 208, 20, 38);
+    }
+  }
+
+  // ── Speech bubble with crying emoji ──
+
+  private drawSpeechBubble(ctx: CanvasRenderingContext2D, progress: number, timestamp: number) {
+    if (progress < 0.12 || progress > 0.20) return;
+
+    // Fade in/out
+    const alpha = Math.min(
+      mapRange(progress, 0.12, 0.14, 0, 1),
+      mapRange(progress, 0.18, 0.20, 1, 0)
+    );
+    if (alpha <= 0) return;
+
+    ctx.globalAlpha = clamp(alpha, 0, 1);
+
+    // Bounce
+    const bounce = Math.sin(timestamp * 0.004) * 1.5;
+    const bx = 210;
+    const by = 195 + bounce;
+
+    // Bubble background (white rounded rect via pixel art)
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(bx + 2, by, 26, 18);
+    ctx.fillRect(bx, by + 2, 30, 14);
+    ctx.fillRect(bx + 1, by + 1, 28, 16);
+
+    // Tail pointing down-right toward Friend
+    ctx.fillRect(bx + 20, by + 18, 4, 3);
+    ctx.fillRect(bx + 22, by + 21, 3, 2);
+
+    // Border (dark outline)
+    ctx.fillStyle = '#5a5a7a';
+    ctx.fillRect(bx + 2, by - 1, 26, 1);
+    ctx.fillRect(bx + 2, by + 18, 26, 1);
+    ctx.fillRect(bx - 1, by + 2, 1, 14);
+    ctx.fillRect(bx + 30, by + 2, 1, 14);
+
+    // Crying face inside bubble
+    const fx = bx + 9;
+    const fy = by + 3;
+
+    // Eyes (black dots)
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(fx, fy + 2, 2, 2);
+    ctx.fillRect(fx + 8, fy + 2, 2, 2);
+
+    // Tears (blue lines below eyes)
+    ctx.fillStyle = '#29adff';
+    ctx.fillRect(fx, fy + 5, 1, 3);
+    ctx.fillRect(fx + 1, fy + 6, 1, 3);
+    ctx.fillRect(fx + 8, fy + 5, 1, 3);
+    ctx.fillRect(fx + 9, fy + 6, 1, 3);
+
+    // Open mouth (small oval)
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(fx + 3, fy + 7, 4, 3);
+    ctx.fillStyle = '#ff004d';
+    ctx.fillRect(fx + 4, fy + 8, 2, 1);
+
+    ctx.globalAlpha = 1;
+  }
+
   // ── Phone glow ──
 
   private drawPhoneGlow(ctx: CanvasRenderingContext2D, progress: number) {
@@ -327,10 +518,10 @@ export class TaipeiStationScene {
   // ── Packets ──
 
   private drawPackets(ctx: CanvasRenderingContext2D, progress: number) {
-    if (progress < 0.15) return;
+    if (progress < 0.25) return;
 
     for (let i = 0; i < NUM_PACKETS; i++) {
-      const packetT = mapRange(progress, 0.15, 0.75, 0, 1) - i * PACKET_SPREAD;
+      const packetT = mapRange(progress, 0.25, 0.75, 0, 1) - i * PACKET_SPREAD;
       if (packetT < 0 || packetT > 1) continue;
       const pos = interpolatePath(PACKET_PATH, packetT);
       const color = PACKET_COLORS[i % PACKET_COLORS.length];
@@ -344,7 +535,7 @@ export class TaipeiStationScene {
     }
   }
 
-  // ── Dim overlay ──
+  // ── Dim overlay (screen-space) ──
 
   private drawDimOverlay(ctx: CanvasRenderingContext2D, alpha: number) {
     ctx.fillStyle = `rgba(10, 10, 20, ${clamp(alpha, 0, 0.45)})`;
@@ -356,7 +547,7 @@ export class TaipeiStationScene {
     }
   }
 
-  // ── Pixel text (using canvas built-in at low res = pixelated) ──
+  // ── Pixel text ──
 
   private drawText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number) {
     ctx.save();
